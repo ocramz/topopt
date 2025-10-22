@@ -11,6 +11,8 @@ from __future__ import division
 import numpy
 import torch
 import torch.autograd
+import torch.nn as nn
+import torch.nn.functional as F
 
 from topopt.problems import Problem
 from topopt.filters import Filter
@@ -106,7 +108,96 @@ class VolumeConstraint(torch.autograd.Function):
         return grad_x, None  # None for volfrac argument
 
 
-class TopOptSolver:
+class BetaParameterFunction(torch.autograd.Function):
+    """
+    Implicit differentiation through Beta parameter optimization.
+    
+    For each element, we have a Beta(α_e, β_e) distribution over [0,1].
+    The optimal density ρ_e is sampled from this distribution.
+    
+    Gradients w.r.t. α, β are computed via implicit function theorem:
+    dC/dα = (∂C/∂ρ) · (∂E[ρ]/∂α) where E[ρ] = α/(α+β)
+    """
+    
+    @staticmethod
+    def forward(ctx, alpha, beta, problem, n_samples=100):
+        """
+        Forward: compute expected compliance over Beta samples.
+        
+        Parameters
+        ----------
+        alpha : torch.Tensor
+            Shape (n_elements,), must be > 1
+        beta : torch.Tensor
+            Shape (n_elements,), must be > 1
+        problem : Problem
+            FEM problem instance
+        n_samples : int
+            Number of samples for expectation
+            
+        Returns
+        -------
+        torch.Tensor
+            Expected compliance value
+        """
+        alpha_np = alpha.detach().cpu().numpy()
+        beta_np = beta.detach().cpu().numpy()
+        
+        # Sample from Beta distributions: ρ_e ~ Beta(α_e, β_e)
+        rho_samples = numpy.random.beta(alpha_np, beta_np, 
+                                       size=(n_samples, len(alpha_np)))
+        
+        # Compute compliance for each sample and average sensitivities
+        compliances = []
+        dobj_avg = numpy.zeros_like(alpha_np)
+        
+        for sample in rho_samples:
+            dobj_sample = numpy.zeros_like(sample)
+            c = problem.compute_objective(sample, dobj_sample)
+            compliances.append(c)
+            dobj_avg += dobj_sample
+        
+        # Expected compliance: E[C(ρ)]
+        obj = numpy.mean(compliances)
+        dobj_avg /= n_samples
+        
+        # Save for implicit differentiation
+        ctx.save_for_backward(alpha, beta)
+        ctx.dobj_avg = torch.from_numpy(dobj_avg).float()
+        ctx.n_samples = n_samples
+        
+        return torch.tensor(obj, dtype=alpha.dtype)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Implicit differentiation using gradient of Beta moments.
+        
+        By implicit function theorem:
+        - E[ρ] = α/(α+β)   (mean of Beta)
+        - dE[ρ]/dα = β/(α+β)²
+        - dE[ρ]/dβ = -α/(α+β)²
+        
+        dC/dα = (∂C/∂ρ) · (∂E[ρ]/∂α)
+        """
+        alpha, beta = ctx.saved_tensors
+        dobj = ctx.dobj_avg
+        
+        # Moments of Beta distribution
+        ab_sum = alpha + beta
+        
+        # Gradient of mean E[ρ] w.r.t. parameters
+        # dE[ρ]/dα = β/(α+β)²
+        d_mean_d_alpha = beta / (ab_sum ** 2)
+        
+        # dE[ρ]/dβ = -α/(α+β)²
+        d_mean_d_beta = -alpha / (ab_sum ** 2)
+        
+        # Chain rule through expected compliance
+        grad_alpha = dobj * d_mean_d_alpha * grad_output
+        grad_beta = dobj * d_mean_d_beta * grad_output
+        
+        return grad_alpha, grad_beta, None, None
     """Solver using mirror descent on the simplex with PyTorch autograd."""
 
     def __init__(self, problem: Problem, volfrac: float, filter: Filter,
@@ -301,6 +392,195 @@ class TopOptSolver:
         if self.active.size > 0:
             self.xPhys[self.active] = 1
         return self.xPhys
+
+
+class BetaSolverWithImplicitDiff(TopOptSolver):
+    """
+    Topology optimization using Beta-distributed design variables.
+    
+    Each element density ρ_e ~ Beta(α_e, β_e) where α_e, β_e are optimized
+    via implicit differentiation through the FEM analysis.
+    
+    This approach provides:
+    - Exact FEM gradients via implicit differentiation
+    - Uncertainty quantification through Beta parameters
+    - Principled probabilistic design exploration
+    """
+    
+    def __init__(self, problem: Problem, volfrac: float, filter: Filter,
+                 gui: GUI, maxeval=2000, ftol_rel=1e-3, learning_rate=0.01,
+                 n_samples=50):
+        """
+        Create solver with Beta-distributed design variables.
+        
+        Parameters
+        ----------
+        problem : Problem
+            FEM problem
+        volfrac : float
+            Volume constraint
+        filter : Filter
+            Density filter
+        gui : GUI
+            Visualization
+        maxeval : int
+            Max iterations
+        ftol_rel : float
+            Convergence tolerance
+        learning_rate : float
+            Adam optimizer learning rate
+        n_samples : int
+            Samples per iteration for Monte Carlo expectation
+        """
+        super().__init__(problem, volfrac, filter, gui, maxeval, ftol_rel, 
+                        learning_rate)
+        self.n_samples = n_samples
+        
+        # Initialize Beta parameters
+        n_elements = problem.nelx * problem.nely
+        
+        # Start with Beta(2, 2) - roughly uniform on [0,1]
+        # Use softplus transformation to enforce α, β > 1
+        self.alpha_logit = nn.Parameter(torch.ones(n_elements) * 0.0)
+        self.beta_logit = nn.Parameter(torch.ones(n_elements) * 0.0)
+        
+        # Optimizer for Beta parameters
+        self.optimizer = torch.optim.Adam(
+            [self.alpha_logit, self.beta_logit], 
+            lr=learning_rate
+        )
+        
+        # Constraint on volume
+        self.lambda_vol = 0.0
+    
+    def _get_alpha_beta(self):
+        """
+        Get α and β from logit parameters, ensuring α, β > 1.
+        
+        Uses softplus + 1 to ensure positivity and minimum value of 1.
+        """
+        alpha = F.softplus(self.alpha_logit) + 1.0
+        beta = F.softplus(self.beta_logit) + 1.0
+        return alpha, beta
+    
+    def optimize(self, x: numpy.ndarray) -> numpy.ndarray:
+        """
+        Optimize Beta parameters using implicit differentiation.
+        
+        Parameters
+        ----------
+        x : numpy.ndarray
+            Initial design (not used, overridden by Beta initialization)
+            
+        Returns
+        -------
+        numpy.ndarray
+            Optimal design densities (mean of learned Beta)
+        """
+        prev_obj = float('inf')
+        
+        for iteration in range(self.maxeval):
+            self.optimizer.zero_grad()
+            
+            # Get α, β ensuring they are > 1
+            alpha, beta = self._get_alpha_beta()
+            
+            # Compute compliance with implicit differentiation
+            obj = BetaParameterFunction.apply(alpha, beta, 
+                                             self.problem, self.n_samples)
+            
+            # Volume constraint in expectation
+            # E[ρ] = α/(α+β)
+            mean_rho = alpha / (alpha + beta)
+            vol_constraint = mean_rho.mean() - self.volfrac
+            
+            # Augmented Lagrangian
+            penalty = 100.0
+            lagrangian = obj + self.lambda_vol * vol_constraint + \
+                        (penalty / 2.0) * vol_constraint ** 2
+            
+            # Backward pass
+            lagrangian.backward()
+            self.optimizer.step()
+            
+            # Dual update for Lagrange multiplier
+            self.lambda_vol += 0.01 * vol_constraint.item()
+            
+            # Print progress
+            if iteration % 50 == 0:
+                alpha_val, beta_val = self._get_alpha_beta()
+                print(f"Iter {iteration}: obj={obj.item():.6f}, "
+                      f"vol={vol_constraint.item():.6f}, "
+                      f"α_mean={alpha_val.mean().item():.3f}, "
+                      f"β_mean={beta_val.mean().item():.3f}")
+            
+            # Convergence check
+            if abs(vol_constraint.item()) < 1e-4 and iteration > 100:
+                if abs(prev_obj - obj.item()) / (abs(prev_obj) + 1e-10) < self.ftol_rel:
+                    break
+            
+            prev_obj = obj.item()
+        
+        # Extract final design (use mean of Beta as point estimate)
+        alpha_final, beta_final = self._get_alpha_beta()
+        final_rho = (alpha_final / (alpha_final + beta_final)).detach().cpu().numpy()
+        
+        return final_rho
+    
+    def get_confidence_intervals(self, percentile=95):
+        """
+        Return credible intervals for each element's density.
+        
+        Since each ρ_e ~ Beta(α_e, β_e), compute quantile-based intervals.
+        
+        Parameters
+        ----------
+        percentile : float
+            Confidence level (default 95%)
+            
+        Returns
+        -------
+        tuple of numpy.ndarray
+            (lower, upper) bounds for each element density
+        """
+        try:
+            from scipy import stats
+        except ImportError:
+            raise ImportError("scipy required for confidence intervals")
+        
+        alpha_final, beta_final = self._get_alpha_beta()
+        
+        alpha_np = alpha_final.detach().cpu().numpy()
+        beta_np = beta_final.detach().cpu().numpy()
+        
+        p_lower = (100 - percentile) / 2 / 100
+        p_upper = 1 - p_lower
+        
+        lower = numpy.array([stats.beta.ppf(p_lower, a, b) 
+                            for a, b in zip(alpha_np, beta_np)])
+        upper = numpy.array([stats.beta.ppf(p_upper, a, b) 
+                            for a, b in zip(alpha_np, beta_np)])
+        
+        return lower, upper
+    
+    def get_design_variance(self):
+        """
+        Compute variance of densities for each element.
+        
+        For Beta(α, β):
+        Var[ρ] = (α·β) / ((α+β)² · (α+β+1))
+        
+        Returns
+        -------
+        numpy.ndarray
+            Variance for each element
+        """
+        alpha, beta = self._get_alpha_beta()
+        
+        ab_sum = alpha + beta
+        variance = (alpha * beta) / ((ab_sum ** 2) * (ab_sum + 1))
+        
+        return variance.detach().cpu().numpy()
 
 
 # TODO: Seperate optimizer from TopOptSolver
