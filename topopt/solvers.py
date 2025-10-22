@@ -28,7 +28,7 @@ class ComplianceFunction(torch.autograd.Function):
     """
     
     @staticmethod
-    def forward(ctx, x_phys, problem):
+    def forward(ctx, x_phys: torch.Tensor, problem: Problem):
         """
         Forward pass: compute compliance using FEM.
         
