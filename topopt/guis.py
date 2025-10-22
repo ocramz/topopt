@@ -160,3 +160,28 @@ class StressGUI(GUI):
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
         plt.pause(0.01)
+
+
+class NullGUI(GUI):
+    """A GUI that does nothing - useful for headless/batch operations."""
+    
+    def __init__(self, problem=None, title=""):
+        """Create a null GUI that does nothing."""
+        self.problem = problem
+        self.title = title
+    
+    def init_subplots(self):
+        """Does nothing."""
+        pass
+    
+    def plot_force_arrows(self):
+        """Does nothing."""
+        pass
+    
+    def update(self, xPhys, title=None):
+        """Does nothing."""
+        pass
+
+
+# Alias for backward compatibility
+MatplotlibGUI = GUI

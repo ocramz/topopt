@@ -5,8 +5,7 @@ import pdb
 
 import numpy
 import scipy.sparse
-import cvxopt
-import cvxopt.cholmod
+import scipy.sparse.linalg
 
 from topopt.utils import xy_to_id, id_to_xy, squared_euclidean as normsqr
 
@@ -102,15 +101,20 @@ class VonMisesStressCalculator:
             return p * (sigma)**(p - 1) / (2.0 * sigma) * dinside
 
         K = self.problem.build_K(x)
-        K = cvxopt.spmatrix(
-            K.data, K.row.astype(int), K.col.astype(int))
+        K_csc = K.tocsc()
 
         dK = self.problem.build_dK(x).tocsc()
-        U = numpy.tile(u[self.problem.free, :], (nel, 1))
-        U = cvxopt.matrix(dK.dot(U).reshape(-1, nel * nloads, order="F"))
-        cvxopt.cholmod.linsolve(K, U)  # U stores solution after solve
+        U = dK.dot(U).reshape(-1, nel * nloads, order="F")
+        
+        # Solve K @ du = U for each load case
+        du_free = scipy.sparse.linalg.spsolve(K_csc, U)
+        if du_free.ndim == 1:
+            du_free = du_free.reshape(-1, nel * nloads)
+        else:
+            du_free = du_free.T
+        
         du = numpy.zeros((ndof, nel * nloads))
-        du[self.problem.free, :] = -numpy.array(U)
+        du[self.problem.free, :] = -du_free
         du = du.reshape((ndof * nel, nloads), order="F")
 
         rep_edofMat = (numpy.tile(self.edofMat, nel) + numpy.tile(

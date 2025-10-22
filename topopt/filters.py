@@ -213,3 +213,28 @@ class DensityBasedFilter(Filter):
 
         """
         dv[:] = numpy.asarray(self.H * (dv[numpy.newaxis].T / self.Hs))[:, 0]
+
+
+def DensityFilter(nelx_or_problem, nely_or_rmin=None, rmin=None):
+    """
+    Factory function to create a DensityBasedFilter.
+    
+    Can be called in two ways:
+    1. DensityFilter(problem, rmin=...)  - with a problem object
+    2. DensityFilter(nelx, nely, rmin) - with dimension parameters
+    """
+    if rmin is None and nely_or_rmin is not None:
+        # Called as DensityFilter(nelx, nely, rmin)
+        nelx = nelx_or_problem
+        nely = nely_or_rmin
+        rmin = rmin
+    elif hasattr(nelx_or_problem, 'nelx'):
+        # Called as DensityFilter(problem, rmin=...)
+        problem = nelx_or_problem
+        nelx = problem.nelx
+        nely = problem.nely
+        rmin = nely_or_rmin if nely_or_rmin is not None else 1.5
+    else:
+        raise ValueError("Invalid arguments for DensityFilter")
+    
+    return DensityBasedFilter(nelx, nely, rmin)

@@ -5,8 +5,6 @@ import abc
 import numpy
 import scipy.sparse
 import scipy.sparse.linalg
-import cvxopt
-import cvxopt.cholmod
 
 from .boundary_conditions import BoundaryConditions
 from .utils import deleterowcol
@@ -306,13 +304,32 @@ class ElasticityProblem(Problem):
         """
         # Setup and solve FE problem
         K = self.build_K(xPhys)
-        K = cvxopt.spmatrix(
-            K.data, K.row.astype(int), K.col.astype(int))
-        # Solve system
-        F = cvxopt.matrix(self.f[self.free, :])
-        cvxopt.cholmod.linsolve(K, F)  # F stores solution after solve
+        K_csc = K.tocsc()
+        F = self.f[self.free, :].copy()
+        
+        # Solve K @ u = F for each load case
+        if F.ndim == 1 or F.shape[1] == 1:
+            # Single load case
+            if F.ndim == 2:
+                F = F.ravel()
+            u_free = scipy.sparse.linalg.spsolve(K_csc, F)
+            if u_free.ndim == 1:
+                u_free = u_free.reshape(-1, 1)
+            else:
+                u_free = numpy.asarray(u_free)
+        else:
+            # Multiple load cases - solve for each RHS
+            u_free = scipy.sparse.linalg.spsolve(K_csc, F.toarray() if scipy.sparse.issparse(F) else F)
+            if scipy.sparse.issparse(u_free):
+                u_free = u_free.toarray()
+            else:
+                u_free = numpy.asarray(u_free)
+            if u_free.ndim == 1:
+                u_free = u_free.reshape(-1, F.shape[1])
+        
+        # Assemble full displacement vector
         new_u = self.u.copy()
-        new_u[self.free, :] = numpy.array(F)[:, :]
+        new_u[self.free, :] = u_free
         return new_u
 
     def update_displacements(self, xPhys: numpy.ndarray) -> None:
@@ -872,3 +889,26 @@ class HarmonicLoadsProblem(ElasticityProblem):
 #         obj = ComplianceProblem.compute_objective(self, xPhys, dobj)
 #         self.compute_stress_objective(xPhys, numpy.zeros(dobj.shape))
 #         return obj
+
+
+def MBBBeam(nelx: int, nely: int, penalty: float = 3.0) -> ComplianceProblem:
+    """
+    Factory function to create an MBB beam compliance problem.
+    
+    Parameters
+    ----------
+    nelx:
+        Number of elements in x direction.
+    nely:
+        Number of elements in y direction.
+    penalty:
+        SIMP penalty parameter (default: 3.0).
+    
+    Returns
+    -------
+    ComplianceProblem
+        A compliance problem with MBB beam boundary conditions.
+    """
+    from .boundary_conditions import MBBBeamBoundaryConditions
+    bc = MBBBeamBoundaryConditions(nelx, nely)
+    return ComplianceProblem(bc, penalty)
