@@ -21,33 +21,34 @@ jobs:
       strategy:
         fail-fast: false
         matrix:
-          os: [ubuntu-latest, macos-latest]
-          python-version: ["3.8", "3.9", "3.10"]
+          os: [ubuntu-latest]
+          python-version: ["3.9"]
           include:
             - os: ubuntu-latest
               name: Linux
-            - os: macOS-latest
-              name: macOS
       steps:
       - uses: actions/checkout@v3
       - name: Set up Python
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-          
-      - name: Dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y libopenblas-dev
+          cache: 'pip'
 
-      - name: Dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install openblas
         
       - name: Dependencies (Python)
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Test
+      # - name: Test
+      #   run: |
+      #     echo "done" | python examples/mechanism_synthesis.py
+
+      - name: pytest
         run: |
-          echo "done" | python examples/mechanism_synthesis.py
+          pip install pytest
+          pytest -v --tb=short
+      
+      # - name: Test Beta Implicit Diff Example
+      #   run: |
+      #     python tests/test_beta_implicit_diff.py

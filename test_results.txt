@@ -1,0 +1,91 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.9.17, pytest-8.4.2, pluggy-1.6.0 -- /Users/marco/Documents/code/Python/topopt/venv/bin/python3.9
+cachedir: .pytest_cache
+rootdir: /Users/marco/Documents/code/Python/topopt
+collecting ... collected 13 items
+
+tests/test_random_loads.py::TestLoadDistributionSampling::test_normal_distribution_sampling PASSED [  7%]
+tests/test_random_loads.py::TestLoadDistributionSampling::test_uniform_distribution_sampling PASSED [ 15%]
+tests/test_random_loads.py::TestLoadDistributionSampling::test_gaussian_mixture_sampling PASSED [ 23%]
+tests/test_random_loads.py::TestLoadDistributionSampling::test_invalid_distribution_type PASSED [ 30%]
+tests/test_random_loads.py::TestLoadDistributionSampling::test_missing_mean PASSED [ 38%]
+tests/test_random_loads.py::TestBetaRandomLoadFunction::test_forward_pass FAILED [ 46%]
+tests/test_random_loads.py::TestBetaRandomLoadFunction::test_backward_pass_computes_gradients FAILED [ 53%]
+tests/test_random_loads.py::TestBetaRandomLoadFunction::test_gradient_finite_difference_check FAILED [ 61%]
+tests/test_random_loads.py::TestBetaSolverRandomLoads::test_solver_initialization PASSED [ 69%]
+tests/test_random_loads.py::TestBetaSolverRandomLoads::test_solver_initialization_default_load_dist PASSED [ 76%]
+tests/test_random_loads.py::TestBetaSolverRandomLoads::test_solver_optimization_runs FAILED [ 84%]
+tests/test_random_loads.py::TestBetaSolverRandomLoads::test_robust_statistics FAILED [ 92%]
+tests/test_random_loads.py::TestComparisonWithBaseBeta::test_deterministic_loads_converge_similarly FAILED [100%]
+
+=================================== FAILURES ===================================
+_________________ TestBetaRandomLoadFunction.test_forward_pass _________________
+tests/test_random_loads.py:116: in test_forward_pass
+    result = BetaRandomLoadFunction.apply(
+venv/lib/python3.9/site-packages/torch/autograd/function.py:553: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+E   TypeError: apply() takes no keyword arguments
+_______ TestBetaRandomLoadFunction.test_backward_pass_computes_gradients _______
+tests/test_random_loads.py:139: in test_backward_pass_computes_gradients
+    result = BetaRandomLoadFunction.apply(
+venv/lib/python3.9/site-packages/torch/autograd/function.py:553: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+E   TypeError: apply() takes no keyword arguments
+_______ TestBetaRandomLoadFunction.test_gradient_finite_difference_check _______
+tests/test_random_loads.py:165: in test_gradient_finite_difference_check
+    result = BetaRandomLoadFunction.apply(
+venv/lib/python3.9/site-packages/torch/autograd/function.py:553: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+E   TypeError: apply() takes no keyword arguments
+___________ TestBetaSolverRandomLoads.test_solver_optimization_runs ____________
+tests/test_random_loads.py:243: in test_solver_optimization_runs
+    x_opt = solver.optimize(x_init)
+topopt/solvers.py:839: in optimize
+    obj = BetaRandomLoadFunction.apply(
+venv/lib/python3.9/site-packages/torch/autograd/function.py:553: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+topopt/solvers.py:312: in forward
+    load_samples = _sample_load_distribution(load_dist_params, n_load_samples)
+topopt/solvers.py:239: in _sample_load_distribution
+    samples = numpy.random.multivariate_normal(mean_array, cov, n_samples)
+numpy/random/mtrand.pyx:4208: in numpy.random.mtrand.RandomState.multivariate_normal
+    ???
+E   ValueError: cov must be 2 dimensional and square
+_______________ TestBetaSolverRandomLoads.test_robust_statistics _______________
+tests/test_random_loads.py:260: in test_robust_statistics
+    solver.optimize(x_init)
+topopt/solvers.py:839: in optimize
+    obj = BetaRandomLoadFunction.apply(
+venv/lib/python3.9/site-packages/torch/autograd/function.py:553: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+topopt/solvers.py:312: in forward
+    load_samples = _sample_load_distribution(load_dist_params, n_load_samples)
+topopt/solvers.py:239: in _sample_load_distribution
+    samples = numpy.random.multivariate_normal(mean_array, cov, n_samples)
+numpy/random/mtrand.pyx:4208: in numpy.random.mtrand.RandomState.multivariate_normal
+    ???
+E   ValueError: cov must be 2 dimensional and square
+____ TestComparisonWithBaseBeta.test_deterministic_loads_converge_similarly ____
+tests/test_random_loads.py:315: in test_deterministic_loads_converge_similarly
+    x_opt2 = solver2.optimize(x_init.copy())
+topopt/solvers.py:839: in optimize
+    obj = BetaRandomLoadFunction.apply(
+venv/lib/python3.9/site-packages/torch/autograd/function.py:553: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+topopt/solvers.py:312: in forward
+    load_samples = _sample_load_distribution(load_dist_params, n_load_samples)
+topopt/solvers.py:239: in _sample_load_distribution
+    samples = numpy.random.multivariate_normal(mean_array, cov, n_samples)
+numpy/random/mtrand.pyx:4208: in numpy.random.mtrand.RandomState.multivariate_normal
+    ???
+E   ValueError: cov must be 2 dimensional and square
+----------------------------- Captured stdout call -----------------------------
+Iter 0: obj=514.690125, vol=0.100000, α_mean=1.698, β_mean=1.688
+=========================== short test summary info ============================
+FAILED tests/test_random_loads.py::TestBetaRandomLoadFunction::test_forward_pass
+FAILED tests/test_random_loads.py::TestBetaRandomLoadFunction::test_backward_pass_computes_gradients
+FAILED tests/test_random_loads.py::TestBetaRandomLoadFunction::test_gradient_finite_difference_check
+FAILED tests/test_random_loads.py::TestBetaSolverRandomLoads::test_solver_optimization_runs
+FAILED tests/test_random_loads.py::TestBetaSolverRandomLoads::test_robust_statistics
+FAILED tests/test_random_loads.py::TestComparisonWithBaseBeta::test_deterministic_loads_converge_similarly
+========================= 6 failed, 7 passed in 6.38s ==========================
