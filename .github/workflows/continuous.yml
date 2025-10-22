@@ -51,3 +51,7 @@ jobs:
       - name: Test
         run: |
           echo "done" | python examples/mechanism_synthesis.py
+      
+      - name: Test Beta Implicit Diff Example
+        run: |
+          python tests/test_beta_implicit_diff.py

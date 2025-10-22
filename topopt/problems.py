@@ -307,7 +307,7 @@ class ElasticityProblem(Problem):
         # Setup and solve FE problem
         K = self.build_K(xPhys)
         K = cvxopt.spmatrix(
-            K.data, K.row.astype(numpy.int), K.col.astype(numpy.int))
+            K.data, K.row.astype(int), K.col.astype(int))
         # Solve system
         F = cvxopt.matrix(self.f[self.free, :])
         cvxopt.cholmod.linsolve(K, F)  # F stores solution after solve
@@ -395,6 +395,8 @@ class ComplianceProblem(ElasticityProblem):
 
 
 class HarmonicLoadsProblem(ElasticityProblem):
+    """Placeholder for harmonic loads problem."""
+    pass
 #     r"""
 #     Topology optimization problem to minimize dynamic compliance.
 

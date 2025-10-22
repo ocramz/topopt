@@ -103,7 +103,7 @@ class VonMisesStressCalculator:
 
         K = self.problem.build_K(x)
         K = cvxopt.spmatrix(
-            K.data, K.row.astype(numpy.int), K.col.astype(numpy.int))
+            K.data, K.row.astype(int), K.col.astype(int))
 
         dK = self.problem.build_dK(x).tocsc()
         U = numpy.tile(u[self.problem.free, :], (nel, 1))

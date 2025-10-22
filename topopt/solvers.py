@@ -200,6 +200,7 @@ class BetaParameterFunction(torch.autograd.Function):
         return grad_alpha, grad_beta, None, None
 
 
+<<<<<<< HEAD
 def _sample_load_distribution(dist_params, n_samples):
     """
     Sample from specified load distribution.
@@ -362,6 +363,9 @@ class BetaRandomLoadFunction(torch.autograd.Function):
         return grad_alpha, grad_beta, None, None, None, None
 
 
+=======
+class TopOptSolver:
+>>>>>>> 0983bf624982fb46d2010aa1a9dd36d7b998483f
     """Solver using mirror descent on the simplex with PyTorch autograd."""
 
     def __init__(self, problem: Problem, volfrac: float, filter: Filter,
