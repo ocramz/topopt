@@ -234,7 +234,9 @@ def _sample_load_distribution(dist_params, n_samples):
         if cov is None:
             # Default: 10% standard deviation
             std = dist_params.get('std', 0.1 * numpy.abs(mean_array))
-            cov = numpy.diag(std ** 2)
+            std_array = numpy.asarray(std).flatten()
+            # Ensure std_array has proper shape and create diagonal covariance
+            cov = numpy.diag(std_array ** 2)
         
         samples = numpy.random.multivariate_normal(mean_array, cov, n_samples)
         
@@ -320,9 +322,10 @@ class BetaRandomLoadFunction(torch.autograd.Function):
         
         for rho in rho_samples:
             for f in load_samples:
-                # Temporarily set load
+                # Temporarily set load (reshape 1D to 2D column vector if needed)
                 if hasattr(problem, 'f'):
-                    problem.f = f
+                    f_reshaped = f.reshape(-1, 1) if f.ndim == 1 else f
+                    problem.f = f_reshaped
                 
                 dobj_sample = numpy.zeros_like(rho)
                 c = problem.compute_objective(rho, dobj_sample)
@@ -913,7 +916,8 @@ class BetaSolverRandomLoads(BetaSolverWithImplicitDiff):
         try:
             for f in load_samples:
                 if hasattr(self.problem, 'f'):
-                    self.problem.f = f
+                    f_reshaped = f.reshape(-1, 1) if f.ndim == 1 else f
+                    self.problem.f = f_reshaped
                 
                 dobj_dummy = numpy.zeros_like(rho_opt)
                 c = self.problem.compute_objective(rho_opt, dobj_dummy)
