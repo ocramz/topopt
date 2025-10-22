@@ -198,6 +198,170 @@ class BetaParameterFunction(torch.autograd.Function):
         grad_beta = dobj * d_mean_d_beta * grad_output
         
         return grad_alpha, grad_beta, None, None
+
+
+def _sample_load_distribution(dist_params, n_samples):
+    """
+    Sample from specified load distribution.
+    
+    Parameters
+    ----------
+    dist_params : dict
+        Distribution specification with keys:
+        - 'type': 'normal', 'uniform', or 'gaussian_mixture'
+        - 'mean': base load vector
+        - Additional parameters depend on type
+        
+    n_samples : int
+        Number of samples to draw
+        
+    Returns
+    -------
+    numpy.ndarray
+        Shape (n_samples, n_dof) - load vectors for each sample
+    """
+    dist_type = dist_params.get('type', 'normal')
+    mean = dist_params.get('mean')
+    
+    if mean is None:
+        raise ValueError("Load distribution must specify 'mean'")
+    
+    mean_array = numpy.asarray(mean).flatten()
+    n_dof = len(mean_array)
+    
+    if dist_type == 'normal':
+        cov = dist_params.get('cov', None)
+        if cov is None:
+            # Default: 10% standard deviation
+            std = dist_params.get('std', 0.1 * numpy.abs(mean_array))
+            cov = numpy.diag(std ** 2)
+        
+        samples = numpy.random.multivariate_normal(mean_array, cov, n_samples)
+        
+    elif dist_type == 'uniform':
+        scale = dist_params.get('scale', 0.1 * numpy.abs(mean_array))
+        scale_array = numpy.asarray(scale).flatten()
+        samples = mean_array[None, :] + numpy.random.uniform(
+            -scale_array[None, :], scale_array[None, :], size=(n_samples, n_dof)
+        )
+    
+    elif dist_type == 'gaussian_mixture':
+        weights = dist_params.get('weights', [0.5, 0.5])
+        means_list = dist_params.get('means', [mean_array * 0.9, mean_array * 1.1])
+        covs = dist_params.get('covs', 
+                               [numpy.eye(n_dof) * (0.05 * numpy.abs(mean_array)) ** 2 
+                                for _ in means_list])
+        
+        samples = []
+        for _ in range(n_samples):
+            idx = numpy.random.choice(len(means_list), p=weights)
+            sample = numpy.random.multivariate_normal(means_list[idx], covs[idx])
+            samples.append(sample)
+        samples = numpy.array(samples)
+    
+    else:
+        raise ValueError(f"Unknown distribution type: {dist_type}")
+    
+    return samples
+
+
+class BetaRandomLoadFunction(torch.autograd.Function):
+    """
+    Implicit differentiation through Beta parameters under random loads.
+    
+    Optimizes: min E_ρ,f[C(ρ, f)] 
+    where: ρ ~ Beta(α, β), f ~ LoadDistribution
+    
+    This handles BOTH design uncertainty AND load uncertainty jointly.
+    """
+    
+    @staticmethod
+    def forward(ctx, alpha, beta, problem, load_dist_params,
+                n_design_samples=50, n_load_samples=20):
+        """
+        Forward: compute expected compliance over design AND load uncertainty.
+        
+        Parameters
+        ----------
+        alpha : torch.Tensor
+            Shape (n_elements,), design Beta parameter
+        beta : torch.Tensor
+            Shape (n_elements,), design Beta parameter
+        problem : Problem
+            FEM problem with nominal load
+        load_dist_params : dict
+            Load distribution specification
+        n_design_samples : int
+            Monte Carlo samples over designs
+        n_load_samples : int
+            Monte Carlo samples over loads
+            
+        Returns
+        -------
+        torch.Tensor
+            Expected compliance E_ρ,f[C(ρ,f)]
+        """
+        alpha_np = alpha.detach().cpu().numpy()
+        beta_np = beta.detach().cpu().numpy()
+        
+        # Sample designs: ρ ~ Beta(α, β)
+        rho_samples = numpy.random.beta(alpha_np, beta_np,
+                                        size=(n_design_samples, len(alpha_np)))
+        
+        # Sample loads from specified distribution
+        load_samples = _sample_load_distribution(load_dist_params, n_load_samples)
+        
+        # Store nominal load
+        nominal_load = problem.f.copy() if hasattr(problem, 'f') else None
+        
+        # Compute compliance for each (ρ, f) pair and average sensitivities
+        compliances = []
+        sensitivities_avg = numpy.zeros_like(alpha_np)
+        
+        for rho in rho_samples:
+            for f in load_samples:
+                # Temporarily set load
+                if hasattr(problem, 'f'):
+                    problem.f = f
+                
+                dobj_sample = numpy.zeros_like(rho)
+                c = problem.compute_objective(rho, dobj_sample)
+                compliances.append(c)
+                sensitivities_avg += dobj_sample
+        
+        # Restore nominal load
+        if nominal_load is not None and hasattr(problem, 'f'):
+            problem.f = nominal_load
+        
+        # Average over all (design, load) pairs
+        obj = numpy.mean(compliances)
+        sensitivities_avg /= (n_design_samples * n_load_samples)
+        
+        # Save for backward pass
+        ctx.save_for_backward(alpha, beta)
+        ctx.sensitivities_avg = torch.from_numpy(sensitivities_avg).float()
+        ctx.n_design_samples = n_design_samples
+        ctx.n_load_samples = n_load_samples
+        
+        return torch.tensor(obj, dtype=alpha.dtype)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Implicit differentiation through nested expectation."""
+        alpha, beta = ctx.saved_tensors
+        sensitivities = ctx.sensitivities_avg
+        
+        # Beta moment derivatives (same as BetaParameterFunction)
+        ab_sum = alpha + beta
+        d_mean_d_alpha = beta / (ab_sum ** 2)
+        d_mean_d_beta = -alpha / (ab_sum ** 2)
+        
+        grad_alpha = sensitivities * d_mean_d_alpha * grad_output
+        grad_beta = sensitivities * d_mean_d_beta * grad_output
+        
+        return grad_alpha, grad_beta, None, None, None, None
+
+
     """Solver using mirror descent on the simplex with PyTorch autograd."""
 
     def __init__(self, problem: Problem, volfrac: float, filter: Filter,
@@ -581,6 +745,194 @@ class BetaSolverWithImplicitDiff(TopOptSolver):
         variance = (alpha * beta) / ((ab_sum ** 2) * (ab_sum + 1))
         
         return variance.detach().cpu().numpy()
+
+
+class BetaSolverRandomLoads(BetaSolverWithImplicitDiff):
+    """
+    Topology optimization under BOTH design AND load uncertainty.
+    
+    Minimizes: E_ρ,f[C(ρ, f)]
+    subject to: E_ρ[∑ρ_e] ≤ V_frac
+    
+    where: ρ_e ~ Beta(α_e, β_e), f ~ specified distribution
+    
+    This handles joint optimization of design and robustness to load variability.
+    """
+    
+    def __init__(self, problem: Problem, volfrac: float, filter: Filter,
+                 gui: GUI, load_dist_params=None, maxeval=2000, 
+                 ftol_rel=1e-3, learning_rate=0.01, 
+                 n_design_samples=50, n_load_samples=20):
+        """
+        Initialize solver for random loads.
+        
+        Parameters
+        ----------
+        problem : Problem
+            FEM problem with nominal load
+        volfrac : float
+            Volume constraint
+        filter : Filter
+            Density filter
+        gui : GUI
+            Visualization
+        load_dist_params : dict, optional
+            Load distribution specification:
+            {
+                'type': 'normal',  # or 'uniform', 'gaussian_mixture'
+                'mean': problem.f,  # base load
+                'cov': covariance_matrix,  # or 'scale'/'std' depending on type
+                ...
+            }
+            If None, defaults to normal distribution with 10% std dev
+        maxeval : int
+            Maximum iterations
+        ftol_rel : float
+            Convergence tolerance
+        learning_rate : float
+            Adam learning rate
+        n_design_samples : int
+            Monte Carlo samples for design variables
+        n_load_samples : int
+            Monte Carlo samples for loads
+        """
+        super().__init__(problem, volfrac, filter, gui, maxeval, ftol_rel,
+                        learning_rate, n_samples=n_design_samples)
+        
+        # Load distribution
+        if load_dist_params is None:
+            # Default: normal distribution with 10% std dev
+            load_dist_params = {
+                'type': 'normal',
+                'mean': problem.f.copy() if hasattr(problem, 'f') else numpy.ones(problem.ndof),
+                'std': 0.1 * numpy.ones(problem.f.shape if hasattr(problem, 'f') else (problem.ndof,))
+            }
+        
+        self.load_dist_params = load_dist_params
+        self.n_load_samples = n_load_samples
+        self.nominal_load = problem.f.copy() if hasattr(problem, 'f') else None
+    
+    def optimize(self, x: numpy.ndarray) -> numpy.ndarray:
+        """
+        Optimize with nested Monte Carlo over designs and loads.
+        
+        Parameters
+        ----------
+        x : numpy.ndarray
+            Initial design (not used, overridden by Beta initialization)
+            
+        Returns
+        -------
+        numpy.ndarray
+            Optimal design densities robust to load uncertainty
+        """
+        prev_obj = float('inf')
+        
+        for iteration in range(self.maxeval):
+            self.optimizer.zero_grad()
+            
+            # Get α, β ensuring they are > 1
+            alpha, beta = self._get_alpha_beta()
+            
+            # Compute compliance with nested Monte Carlo + implicit differentiation
+            obj = BetaRandomLoadFunction.apply(
+                alpha, beta, self.problem, self.load_dist_params,
+                self.n_samples, self.n_load_samples
+            )
+            
+            # Volume constraint (expectation over designs only)
+            mean_rho = alpha / (alpha + beta)
+            vol_constraint = mean_rho.mean() - self.volfrac
+            
+            # Augmented Lagrangian
+            penalty = 100.0
+            lagrangian = obj + self.lambda_vol * vol_constraint + \
+                        (penalty / 2.0) * vol_constraint ** 2
+            
+            # Backward pass
+            lagrangian.backward()
+            self.optimizer.step()
+            
+            # Dual update for Lagrange multiplier
+            self.lambda_vol += 0.01 * vol_constraint.item()
+            
+            # Print progress
+            if iteration % 50 == 0:
+                alpha_val, beta_val = self._get_alpha_beta()
+                print(f"Iter {iteration}: E[C(ρ,f)]={obj.item():.6f}, "
+                      f"vol={vol_constraint.item():.6f}, "
+                      f"α∈[{alpha_val.min().item():.2f}, {alpha_val.max().item():.2f}]")
+            
+            # Convergence check
+            if abs(vol_constraint.item()) < 1e-4 and iteration > 100:
+                if abs(prev_obj - obj.item()) / (abs(prev_obj) + 1e-10) < self.ftol_rel:
+                    break
+            
+            prev_obj = obj.item()
+        
+        # Restore nominal load
+        if self.nominal_load is not None and hasattr(self.problem, 'f'):
+            self.problem.f = self.nominal_load
+        
+        # Extract final design
+        alpha_final, beta_final = self._get_alpha_beta()
+        final_rho = (alpha_final / (alpha_final + beta_final)).detach().cpu().numpy()
+        
+        return final_rho
+    
+    def get_robust_statistics(self, n_eval_samples=1000):
+        """
+        Evaluate design robustness: compute distribution of compliance under random loads.
+        
+        Parameters
+        ----------
+        n_eval_samples : int
+            Number of load samples to evaluate
+            
+        Returns
+        -------
+        dict with robustness statistics:
+            - 'mean': average compliance
+            - 'std': standard deviation
+            - 'min', 'max': range
+            - 'percentile_5', 'percentile_95': confidence bounds
+            - 'all_samples': array of all compliance values
+        """
+        # Get optimal design
+        alpha_final, beta_final = self._get_alpha_beta()
+        rho_opt = (alpha_final / (alpha_final + beta_final)).detach().cpu().numpy()
+        
+        # Sample loads and evaluate
+        load_samples = _sample_load_distribution(self.load_dist_params, n_eval_samples)
+        
+        # Store nominal load
+        nominal_load = self.problem.f.copy() if hasattr(self.problem, 'f') else None
+        
+        compliances = []
+        try:
+            for f in load_samples:
+                if hasattr(self.problem, 'f'):
+                    self.problem.f = f
+                
+                dobj_dummy = numpy.zeros_like(rho_opt)
+                c = self.problem.compute_objective(rho_opt, dobj_dummy)
+                compliances.append(c)
+        finally:
+            # Restore nominal load
+            if nominal_load is not None and hasattr(self.problem, 'f'):
+                self.problem.f = nominal_load
+        
+        compliances = numpy.array(compliances)
+        
+        return {
+            'mean': compliances.mean(),
+            'std': compliances.std(),
+            'min': compliances.min(),
+            'max': compliances.max(),
+            'percentile_5': numpy.percentile(compliances, 5),
+            'percentile_95': numpy.percentile(compliances, 95),
+            'all_samples': compliances
+        }
 
 
 # TODO: Seperate optimizer from TopOptSolver
