@@ -32,10 +32,11 @@ jobs:
         uses: actions/setup-python@v3
         with:
           python-version: ${{ matrix.python-version }}
+          cache: 'pip'
           
-      - name: Dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y libopenblas-dev
+      # - name: Dependencies (Linux)
+      #   if: runner.os == 'Linux'
+      #   run: sudo apt-get install -y libopenblas-dev
         
       - name: Dependencies (Python)
         run: |
@@ -45,7 +46,12 @@ jobs:
       # - name: Test
       #   run: |
       #     echo "done" | python examples/mechanism_synthesis.py
-      
-      - name: Test Beta Implicit Diff Example
+
+      - name: pytest
         run: |
-          python tests/test_beta_implicit_diff.py
+          pip install pytest
+          pytest -v --tb=short
+      
+      # - name: Test Beta Implicit Diff Example
+      #   run: |
+      #     python tests/test_beta_implicit_diff.py
