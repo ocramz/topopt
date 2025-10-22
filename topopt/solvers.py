@@ -198,6 +198,9 @@ class BetaParameterFunction(torch.autograd.Function):
         grad_beta = dobj * d_mean_d_beta * grad_output
         
         return grad_alpha, grad_beta, None, None
+
+
+class TopOptSolver:
     """Solver using mirror descent on the simplex with PyTorch autograd."""
 
     def __init__(self, problem: Problem, volfrac: float, filter: Filter,

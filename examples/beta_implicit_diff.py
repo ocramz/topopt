@@ -8,9 +8,9 @@ This example demonstrates the BetaSolverWithImplicitDiff using:
 """
 
 import numpy as np
-from topopt.boundary_conditions import MBBBeam
+from topopt.boundary_conditions import MBBBeamBoundaryConditions
 from topopt.problems import ComplianceProblem
-from topopt.filters import DensityFilter
+from topopt.filters import DensityBasedFilter
 from topopt.guis import GUI
 from topopt.solvers import BetaSolverWithImplicitDiff
 
@@ -30,16 +30,16 @@ def example_beta_mbb_beam():
     rmin = 1.5
     
     # Boundary conditions
-    bc = MBBBeam(nelx, nely)
+    bc = MBBBeamBoundaryConditions(nelx, nely)
     
     # Create problem
     problem = ComplianceProblem(bc, penalty=penalty)
     
     # Create filter
-    filter_obj = DensityFilter(nelx, nely, rmin)
+    filter_obj = DensityBasedFilter(nelx, nely, rmin)
     
     # Create GUI
-    gui = GUI(nelx, nely)
+    gui = GUI(problem, title="Beta MBB Beam Example")
     
     # Create Beta solver with implicit differentiation
     solver = BetaSolverWithImplicitDiff(
@@ -84,10 +84,10 @@ def example_uncertainty_quantification():
     penalty = 3.0
     rmin = 1.5
     
-    bc = MBBBeam(nelx, nely)
+    bc = MBBBeamBoundaryConditions(nelx, nely)
     problem = ComplianceProblem(bc, penalty=penalty)
-    filter_obj = DensityFilter(nelx, nely, rmin)
-    gui = GUI(nelx, nely)
+    filter_obj = DensityBasedFilter(nelx, nely, rmin)
+    gui = GUI(problem, title="UQ Example")
     
     solver = BetaSolverWithImplicitDiff(
         problem, volfrac, filter_obj, gui,
@@ -140,10 +140,10 @@ def example_compare_solvers():
     penalty = 3.0
     rmin = 1.5
     
-    bc = MBBBeam(nelx, nely)
+    bc = MBBBeamBoundaryConditions(nelx, nely)
     problem = ComplianceProblem(bc, penalty=penalty)
-    filter_obj = DensityFilter(nelx, nely, rmin)
-    gui = GUI(nelx, nely)
+    filter_obj = DensityBasedFilter(nelx, nely, rmin)
+    gui = GUI(problem, title="Solver Comparison")
     
     x_init = volfrac * np.ones(nelx * nely)
     
