@@ -46,12 +46,17 @@ class ComplianceFunction(torch.autograd.Function):
         dobj = numpy.zeros_like(x_np)
         
         # Compute objective and sensitivity using problem's FEM solver
+        # This modifies dobj IN-PLACE with the sensitivities
         obj = problem.compute_objective(x_np, dobj)
+        
+        # IMPORTANT: dobj is now updated with the actual gradients!
+        # Make a copy to ensure we capture the modified values
+        dobj_copy = dobj.copy()
         
         # Save for backward pass
         ctx.save_for_backward(x_phys)
         ctx.problem = problem
-        ctx.dobj = torch.from_numpy(dobj).float()
+        ctx.dobj = torch.from_numpy(dobj_copy).float()
         
         return torch.tensor(obj, dtype=x_phys.dtype, device=x_phys.device)
     
