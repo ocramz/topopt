@@ -429,3 +429,72 @@ The complete `topopt` framework is production-ready with:
 **Date**: October 22, 2025  
 **Version**: PyTorch Port + Beta Distribution + Random Loads 2.0  
 **Ready for**: Research, Production, Education, Extension
+
+---
+
+## Test Suite Refactoring (October 22, 2025)
+
+### Objective
+Remove optional imports and skipif decorators from `test_random_loads.py` to ensure tests fail loudly if dependencies are missing, rather than silently skipping.
+
+### Changes Made
+
+**File**: `tests/test_random_loads.py`
+
+#### Before
+```python
+try:
+    from topopt.problems import MBBBeam
+    from topopt.filters import DensityFilter
+    from topopt.guis import NullGUI
+    from topopt.solvers import (...)
+    TOPOPT_AVAILABLE = True
+except ImportError as e:
+    TOPOPT_AVAILABLE = False
+    IMPORT_ERROR = str(e)
+
+@pytest.mark.skipif(not TOPOPT_AVAILABLE, reason="topopt not available")
+class TestLoadDistributionSampling:
+    ...
+```
+
+#### After
+```python
+from topopt.problems import MBBBeam
+from topopt.filters import DensityFilter
+from topopt.guis import NullGUI
+from topopt.solvers import (
+    BetaParameterFunction,
+    BetaRandomLoadFunction,
+    BetaSolverWithImplicitDiff,
+    BetaSolverRandomLoads,
+    _sample_load_distribution
+)
+
+class TestLoadDistributionSampling:
+    ...
+```
+
+### What Was Removed
+- ❌ try/except block for conditional imports
+- ❌ TOPOPT_AVAILABLE flag
+- ❌ IMPORT_ERROR variable
+- ❌ 4× @pytest.mark.skipif decorators
+
+### Test Coverage
+- **4 test classes**: All now run unconditionally
+- **13 test methods**: All now required (not optional)
+- **Status**: ✅ All tests required to pass
+
+### Benefits
+1. **Fails loudly**: Missing imports cause test failures, not silent skips
+2. **Clear dependencies**: Import requirements are obvious at top of file
+3. **Better CI/CD**: Test failures catch missing packages immediately
+4. **No hidden failures**: All tests run; no conditions to hide failures
+
+### Philosophy
+If tests are broken, the test suite should **fail**. This ensures:
+- Problems are caught during development/CI
+- Missing dependencies are immediately apparent
+- No silent test skips due to import issues
+- Clear feedback on what needs to be fixed

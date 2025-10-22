@@ -8,25 +8,18 @@ import numpy
 import pytest
 import torch
 
-# Try to import topopt components
-try:
-    from topopt.problems import MBBBeam
-    from topopt.filters import DensityFilter
-    from topopt.guis import NullGUI
-    from topopt.solvers import (
-        BetaParameterFunction,
-        BetaRandomLoadFunction,
-        BetaSolverWithImplicitDiff,
-        BetaSolverRandomLoads,
-        _sample_load_distribution
-    )
-    TOPOPT_AVAILABLE = True
-except ImportError as e:
-    TOPOPT_AVAILABLE = False
-    IMPORT_ERROR = str(e)
+from topopt.problems import MBBBeam
+from topopt.filters import DensityFilter
+from topopt.guis import NullGUI
+from topopt.solvers import (
+    BetaParameterFunction,
+    BetaRandomLoadFunction,
+    BetaSolverWithImplicitDiff,
+    BetaSolverRandomLoads,
+    _sample_load_distribution
+)
 
 
-@pytest.mark.skipif(not TOPOPT_AVAILABLE, reason="topopt not available")
 class TestLoadDistributionSampling:
     """Test load distribution sampling functions."""
     
@@ -101,7 +94,6 @@ class TestLoadDistributionSampling:
             _sample_load_distribution(dist_params, n_samples=10)
 
 
-@pytest.mark.skipif(not TOPOPT_AVAILABLE, reason="topopt not available")
 class TestBetaRandomLoadFunction:
     """Test BetaRandomLoadFunction autograd implementation."""
     
@@ -198,7 +190,6 @@ class TestBetaRandomLoadFunction:
         assert abs(grad_autograd - grad_fd) / (abs(grad_fd) + 1e-6) < 0.5
 
 
-@pytest.mark.skipif(not TOPOPT_AVAILABLE, reason="topopt not available")
 class TestBetaSolverRandomLoads:
     """Test BetaSolverRandomLoads solver class."""
     
@@ -288,7 +279,6 @@ class TestBetaSolverRandomLoads:
         assert len(stats['all_samples']) == 10
 
 
-@pytest.mark.skipif(not TOPOPT_AVAILABLE, reason="topopt not available")
 class TestComparisonWithBaseBeta:
     """Compare BetaSolverRandomLoads with BetaSolverWithImplicitDiff."""
     
