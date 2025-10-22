@@ -7,11 +7,22 @@ This example demonstrates the BetaSolverWithImplicitDiff using:
 - Uncertainty quantification via Beta parameters
 """
 
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+# Use non-interactive backend for visualization
+import matplotlib
+matplotlib.use('Agg')
+
 import numpy as np
 from topopt.boundary_conditions import MBBBeamBoundaryConditions
 from topopt.problems import ComplianceProblem
 from topopt.filters import DensityBasedFilter
-from topopt.guis import GUI
+from topopt.guis import GUI, NullGUI
 from topopt.solvers import BetaSolverWithImplicitDiff
 
 
@@ -24,7 +35,7 @@ def example_beta_mbb_beam():
     """
     
     # Problem setup
-    nelx, nely = 60, 30
+    nelx, nely = 30, 15
     volfrac = 0.4
     penalty = 3.0
     rmin = 1.5
@@ -39,7 +50,7 @@ def example_beta_mbb_beam():
     filter_obj = DensityBasedFilter(nelx, nely, rmin)
     
     # Create GUI
-    gui = GUI(problem, title="Beta MBB Beam Example")
+    gui = NullGUI()  # Use headless GUI
     
     # Create Beta solver with implicit differentiation
     solver = BetaSolverWithImplicitDiff(
@@ -47,9 +58,9 @@ def example_beta_mbb_beam():
         volfrac=volfrac,
         filter=filter_obj,
         gui=gui,
-        maxeval=200,           # Typically needs fewer iterations than mirror descent
+        maxeval=20,            # Reduced from 200 for demo
         learning_rate=0.01,    # Adam learning rate
-        n_samples=100          # Samples for Monte Carlo expectation
+        n_samples=50           # MC samples - Reduced from 100 for demo
     )
     
     # Initial design (not used by Beta solver, but required by interface)
@@ -79,7 +90,7 @@ def example_uncertainty_quantification():
     for each element's density, showing which design choices are uncertain.
     """
     
-    nelx, nely = 40, 20
+    nelx, nely = 20, 10
     volfrac = 0.3
     penalty = 3.0
     rmin = 1.5
@@ -87,13 +98,13 @@ def example_uncertainty_quantification():
     bc = MBBBeamBoundaryConditions(nelx, nely)
     problem = ComplianceProblem(bc, penalty=penalty)
     filter_obj = DensityBasedFilter(nelx, nely, rmin)
-    gui = GUI(problem, title="UQ Example")
+    gui = NullGUI()  # Use headless GUI
     
     solver = BetaSolverWithImplicitDiff(
         problem, volfrac, filter_obj, gui,
-        maxeval=150,
+        maxeval=15,            # Reduced from 150
         learning_rate=0.01,
-        n_samples=100
+        n_samples=50           # Reduced from 100
     )
     
     x = volfrac * np.ones(nelx * nely)
@@ -135,7 +146,7 @@ def example_compare_solvers():
     """
     from topopt.solvers import TopOptSolver
     
-    nelx, nely = 30, 15
+    nelx, nely = 15, 8
     volfrac = 0.4
     penalty = 3.0
     rmin = 1.5
@@ -143,24 +154,24 @@ def example_compare_solvers():
     bc = MBBBeamBoundaryConditions(nelx, nely)
     problem = ComplianceProblem(bc, penalty=penalty)
     filter_obj = DensityBasedFilter(nelx, nely, rmin)
-    gui = GUI(problem, title="Solver Comparison")
+    gui = NullGUI()  # Use headless GUI for this comparison
     
     x_init = volfrac * np.ones(nelx * nely)
     
-    print("Comparing solvers on 30x15 MBB beam...")
+    print("Comparing solvers on 15x8 MBB beam...")
     print("=" * 60)
     
     # Mirror descent solver
     print("\n1. Standard Mirror Descent:")
     solver_md = TopOptSolver(problem, volfrac, filter_obj, gui, 
-                            maxeval=100, learning_rate=0.05)
+                            maxeval=10, learning_rate=0.05)
     x_md = solver_md.optimize(x_init.copy())
     
     # Beta solver
     print("\n2. Beta with Implicit Differentiation:")
     solver_beta = BetaSolverWithImplicitDiff(
         problem, volfrac, filter_obj, gui,
-        maxeval=100, learning_rate=0.01, n_samples=50
+        maxeval=10, learning_rate=0.01, n_samples=30
     )
     x_beta = solver_beta.optimize(x_init.copy())
     
