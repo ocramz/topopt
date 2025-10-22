@@ -22,21 +22,18 @@ jobs:
         fail-fast: false
         matrix:
           os: [ubuntu-latest]
-          python-version: ["3.8", "3.9", "3.10"]
+          python-version: ["3.9"]
           include:
             - os: ubuntu-latest
               name: Linux
       steps:
       - uses: actions/checkout@v3
       - name: Set up Python
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
-          
-      # - name: Dependencies (Linux)
-      #   if: runner.os == 'Linux'
-      #   run: sudo apt-get install -y libopenblas-dev
+
         
       - name: Dependencies (Python)
         run: |
