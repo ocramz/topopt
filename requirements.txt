@@ -1,6 +1,6 @@
 matplotlib
 numpy
 scipy
-nlopt
+torch
 cvxopt
 pathlib; python_version < '3.4'

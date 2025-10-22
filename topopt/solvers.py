@@ -9,20 +9,105 @@ Todo:
 from __future__ import division
 
 import numpy
-import nlopt
+import torch
+import torch.autograd
 
 from topopt.problems import Problem
 from topopt.filters import Filter
 from topopt.guis import GUI
 
 
+class ComplianceFunction(torch.autograd.Function):
+    """
+    Custom autograd function for compliance computation.
+    
+    Wraps the FEM analysis so PyTorch can compute gradients through it.
+    The forward pass solves the FE problem, backward pass uses adjoint method.
+    """
+    
+    @staticmethod
+    def forward(ctx, x_phys, problem):
+        """
+        Forward pass: compute compliance using FEM.
+        
+        Parameters
+        ----------
+        x_phys : torch.Tensor
+            Design variables (densities)
+        problem : Problem
+            The topology optimization problem instance
+            
+        Returns
+        -------
+        torch.Tensor
+            Scalar compliance value
+        """
+        x_np = x_phys.detach().cpu().numpy()
+        dobj = numpy.zeros_like(x_np)
+        
+        # Compute objective and sensitivity using problem's FEM solver
+        obj = problem.compute_objective(x_np, dobj)
+        
+        # Save for backward pass
+        ctx.save_for_backward(x_phys)
+        ctx.problem = problem
+        ctx.dobj = torch.from_numpy(dobj).float()
+        
+        return torch.tensor(obj, dtype=x_phys.dtype, device=x_phys.device)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass: return gradient using stored sensitivities.
+        
+        Since we already computed dobj in forward (adjoint method),
+        we just scale by grad_output.
+        """
+        x_phys, = ctx.saved_tensors
+        dobj = ctx.dobj.to(x_phys.device)
+        
+        # Gradient w.r.t. x_phys
+        grad_x = dobj * grad_output
+        
+        return grad_x, None  # None for problem argument
+
+
+class VolumeConstraint(torch.autograd.Function):
+    """
+    Custom autograd function for volume constraint.
+    
+    Computes g(x) = sum(x)/n_elements - volfrac such that g <= 0.
+    """
+    
+    @staticmethod
+    def forward(ctx, x_phys, volfrac):
+        """Compute volume constraint: g = sum(x)/n_elements - volfrac."""
+        n_elements = x_phys.numel()
+        constraint_value = x_phys.sum() / n_elements - volfrac
+        
+        ctx.save_for_backward(x_phys)
+        ctx.n_elements = n_elements
+        
+        return constraint_value
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Gradient of constraint is uniform: dg/dx = 1/n_elements."""
+        x_phys, = ctx.saved_tensors
+        n_elements = ctx.n_elements
+        
+        grad_x = torch.ones_like(x_phys) / n_elements * grad_output
+        
+        return grad_x, None  # None for volfrac argument
+
+
 class TopOptSolver:
-    """Solver for topology optimization problems using NLopt's MMA solver."""
+    """Solver using mirror descent on the simplex with PyTorch autograd."""
 
     def __init__(self, problem: Problem, volfrac: float, filter: Filter,
-                 gui: GUI, maxeval=2000, ftol_rel=1e-3):
+                 gui: GUI, maxeval=2000, ftol_rel=1e-3, learning_rate=0.05):
         """
-        Create a solver to solve the problem.
+        Create a solver using PyTorch and mirror descent.
 
         Parameters
         ----------
@@ -36,32 +121,27 @@ class TopOptSolver:
             The graphical user interface to visualize intermediate results.
         maxeval: int
             The maximum number of evaluations to perform.
-        ftol: float
+        ftol_rel: float
             A floating point tolerance for relative change.
-
+        learning_rate: float
+            Step size for mirror descent updates.
         """
         self.problem = problem
         self.filter = filter
         self.gui = gui
-
+        self.volfrac = volfrac
+        
         n = problem.nelx * problem.nely
-        self.opt = nlopt.opt(nlopt.LD_MMA, n)
         self.xPhys = numpy.ones(n)
-
-        # set bounds on the value of x (0 ≤ x ≤ 1)
-        self.opt.set_lower_bounds(numpy.zeros(n))
-        self.opt.set_upper_bounds(numpy.ones(n))
-
-        # set stopping criteria
-        self.maxeval = maxeval
-        self.ftol_rel = ftol_rel
-
-        # set objective and constraint functions
-        self.opt.set_min_objective(self.objective_function)
-        self.opt.add_inequality_constraint(self.volume_function, 0)
-        self.volfrac = volfrac  # max volume fraction to use
-
-        # setup filter
+        self._maxeval = maxeval
+        self._ftol_rel = ftol_rel
+        self.learning_rate = learning_rate
+        
+        # Dual variable (Lagrange multiplier for volume constraint)
+        self.lambda_vol = 0.0
+        self.dual_step_size = 0.01
+        
+        # Setup filter
         self.passive = problem.bc.passive_elements
         if self.passive.size > 0:
             self.xPhys[self.passive] = 0
@@ -81,30 +161,30 @@ class TopOptSolver:
         """Create a representation of the solver."""
         return ("{}(problem={!r}, volfrac={:g}, filter={!r}, ".format(
             self.__class__.__name__, self.problem, self.volfrac, self.filter)
-            + "gui={!r}, maxeval={:d}, ftol={:g})".format(
-                self.gui, self.opt.get_maxeval(), self.opt.get_ftol_rel()))
+            + "gui={!r}, maxeval={:d}, ftol={:g}, learning_rate={:g})".format(
+                self.gui, self.maxeval, self.ftol_rel, self.learning_rate))
 
     @property
     def ftol_rel(self):
         """:obj:`float`: Relative tolerance for convergence."""
-        return self.opt.get_ftol_rel()
+        return self._ftol_rel
 
     @ftol_rel.setter
     def ftol_rel(self, ftol_rel):
-        self.opt.set_ftol_rel(ftol_rel)
+        self._ftol_rel = ftol_rel
 
     @property
     def maxeval(self):
         """:obj:`int`: Maximum number of objective evaluations (iterations)."""
-        return self.opt.get_maxeval()
+        return self._maxeval
 
     @maxeval.setter
-    def maxeval(self, ftol_rel):
-        self.opt.set_maxeval(ftol_rel)
+    def maxeval(self, maxeval):
+        self._maxeval = maxeval
 
     def optimize(self, x: numpy.ndarray) -> numpy.ndarray:
         """
-        Optimize the problem.
+        Optimize the problem using mirror descent with augmented Lagrangian.
 
         Parameters
         ----------
@@ -115,11 +195,86 @@ class TopOptSolver:
         -------
         numpy.ndarray
             The optimal value of x found.
-
         """
         self.xPhys = x.copy()
-        x = self.opt.optimize(x)
-        return x
+        
+        # Convert to torch tensor
+        x_torch = torch.from_numpy(x.copy()).float()
+        x_torch.requires_grad_(True)
+        
+        prev_obj = float('inf')
+        penalty_param = 1.0
+        
+        for iteration in range(self.maxeval):
+            # Filter design variables
+            self.filter_variables(x_torch.detach().cpu().numpy())
+            
+            # Compute objective using custom autograd function
+            obj_value = ComplianceFunction.apply(x_torch, self.problem)
+            
+            # Compute volume constraint
+            vol_constraint = VolumeConstraint.apply(x_torch, self.volfrac)
+            
+            # Augmented Lagrangian: L = obj + lambda*g + (penalty/2)*g^2
+            lagrangian = obj_value + self.lambda_vol * vol_constraint + \
+                         (penalty_param / 2.0) * vol_constraint ** 2
+            
+            # Backward pass
+            if x_torch.grad is not None:
+                x_torch.grad.zero_()
+            lagrangian.backward()
+            
+            grad = x_torch.grad.clone().detach()
+            
+            # Mirror descent step in log-space (natural gradient on simplex)
+            log_x = torch.log(torch.clamp(x_torch.detach(), min=1e-10))
+            log_x = log_x - self.learning_rate * grad
+            
+            # Project back to simplex via softmax
+            x_torch = self._softmax(log_x)
+            x_torch.requires_grad_(True)
+            
+            # Update Lagrange multiplier (dual ascent)
+            vol_val = vol_constraint.item()
+            self.lambda_vol += self.dual_step_size * vol_val
+            
+            # Increase penalty if constraint not satisfied
+            if abs(vol_val) > 1e-4:
+                penalty_param *= 1.1
+            
+            # Update GUI
+            self.gui.update(self.xPhys)
+            
+            # Check convergence
+            if abs(prev_obj - obj_value.item()) / (abs(prev_obj) + 1e-10) < self.ftol_rel:
+                if iteration > 100:  # Require minimum iterations
+                    break
+            
+            prev_obj = obj_value.item()
+            
+            if iteration % 100 == 0:
+                print(f"Iteration {iteration}: obj={obj_value.item():.6f}, "
+                      f"vol_constraint={vol_val:.6f}, lambda={self.lambda_vol:.6f}")
+        
+        return x_torch.detach().cpu().numpy()
+    
+    def _softmax(self, log_x: torch.Tensor) -> torch.Tensor:
+        """
+        Softmax projection to project onto probability simplex.
+        
+        Parameters
+        ----------
+        log_x : torch.Tensor
+            Log-space representation
+            
+        Returns
+        -------
+        torch.Tensor
+            Projected values on [0, 1]
+        """
+        log_x = log_x - torch.max(log_x)  # Numerical stability
+        exp_x = torch.exp(log_x)
+        return exp_x / torch.sum(exp_x)
 
     def filter_variables(self, x: numpy.ndarray) -> numpy.ndarray:
         """
@@ -134,7 +289,6 @@ class TopOptSolver:
         -------
         numpy.ndarray
             The filtered "physical" variables.
-
         """
         self.filter.filter_variables(x, self.xPhys)
         if self.passive.size > 0:
@@ -142,104 +296,6 @@ class TopOptSolver:
         if self.active.size > 0:
             self.xPhys[self.active] = 1
         return self.xPhys
-
-    def objective_function(
-            self, x: numpy.ndarray, dobj: numpy.ndarray) -> float:
-        """
-        Compute the objective value and gradient.
-
-        Parameters
-        ----------
-        x:
-            The design variables for which to compute the objective.
-        dobj:
-            The gradient of the objective to compute.
-
-        Returns
-        -------
-        float
-            The objective value.
-
-        """
-        # Filter design variables
-        self.filter_variables(x)
-
-        # Objective and sensitivity
-        obj = self.problem.compute_objective(self.xPhys, dobj)
-
-        # Sensitivity filtering
-        self.filter.filter_objective_sensitivities(self.xPhys, dobj)
-
-        # Display physical variables
-        self.gui.update(self.xPhys)
-
-        return obj
-
-    def objective_function_fdiff(self, x: numpy.ndarray, dobj: numpy.ndarray,
-                                 epsilon=1e-6) -> float:
-        """
-        Compute the objective value and gradient using finite differences.
-
-        Parameters
-        ----------
-        x:
-            The design variables for which to compute the objective.
-        dobj:
-            The gradient of the objective to compute.
-        epsilon:
-            Change in the finite difference to compute the gradient.
-
-        Returns
-        -------
-        float
-            The objective value.
-
-        """
-        obj = self.objective_function(x, dobj)
-
-        x0 = x.copy()
-        dobj0 = dobj.copy()
-        dobjf = numpy.zeros(dobj.shape)
-        for i, v in enumerate(x):
-            x = x0.copy()
-            x[i] += epsilon
-            o1 = self.objective_function(x, dobj)
-            x[i] = x0[i] - epsilon
-            o2 = self.objective_function(x, dobj)
-            dobjf[i] = (o1 - o2) / (2 * epsilon)
-            print("finite differences: {:g}".format(
-                numpy.linalg.norm(dobjf - dobj0)))
-            dobj[:] = dobj0
-
-        return obj
-
-    def volume_function(self, x: numpy.ndarray, dv: numpy.ndarray) -> float:
-        """
-        Compute the volume constraint value and gradient.
-
-        Parameters
-        ----------
-        x:
-            The design variables for which to compute the volume constraint.
-        dobj:
-            The gradient of the volume constraint to compute.
-
-        Returns
-        -------
-        float
-            The volume constraint value.
-
-        """
-        # Filter design variables
-        self.filter_variables(x)
-
-        # Volume sensitivities
-        dv[:] = 1.0
-
-        # Sensitivity filtering
-        self.filter.filter_volume_sensitivities(self.xPhys, dv)
-
-        return self.xPhys.sum() - self.volfrac * x.size
 
 
 # TODO: Seperate optimizer from TopOptSolver
