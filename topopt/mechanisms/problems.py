@@ -109,8 +109,8 @@ class MechanismSynthesisProblem(ElasticityProblem):
             K = deleterowcol(K, self.fixed, self.fixed)
         return K.tocoo()
 
-    def compute_objective(self, xPhys: numpy.ndarray, dobj: numpy.ndarray
-                          ) -> float:
+    def compute_objective(self, xPhys: numpy.ndarray
+                          ) -> tuple:
         r"""
         Compute the objective and gradient of the mechanism synthesis problem.
 
@@ -137,12 +137,13 @@ class MechanismSynthesisProblem(ElasticityProblem):
         ----------
         xPhys:
             The density design variables.
-        dobj:
-            The gradient of the objective to compute.
 
         Returns
         -------
-            The objective of the compliant mechanism synthesis problem.
+        tuple
+            A tuple (objective, gradient) where:
+            - objective is the output displacement (float)
+            - gradient is the sensitivity array (numpy.ndarray)
 
         """
         # Setup and solve FE problem
@@ -152,6 +153,7 @@ class MechanismSynthesisProblem(ElasticityProblem):
         λ = self.u[:, 1][self.edofMat].reshape(-1, 8)  # Fixed vector (Kλ = -l)
         obj = self.f[:, 1].T @ self.u[:, 0]
         self.obje[:] = (λ @ self.KE * u).sum(1)
+        dobj = numpy.empty_like(xPhys)
         self.compute_young_moduli(xPhys, dobj)  # Stores the derivative in dobj
         dobj *= -self.obje
-        return obj
+        return obj, dobj

@@ -60,8 +60,7 @@ def example_deterministic_optimization():
     
     # Evaluate on nominal load
     print("\nEvaluating deterministic design:")
-    dobj_dummy = numpy.zeros_like(x_det)
-    c_nominal = problem.compute_objective(x_det, dobj_dummy)
+    c_nominal, _ = problem.compute_objective(x_det)
     print(f"  Compliance on nominal load: {c_nominal:.6f}")
     
     return problem, x_det, c_nominal
@@ -156,8 +155,7 @@ def example_comparison():
     compliances_det = []
     for f in load_samples:
         problem.f = f
-        dobj_dummy = numpy.zeros_like(x_det)
-        c = problem.compute_objective(x_det, dobj_dummy)
+        c, _ = problem.compute_objective(x_det)
         compliances_det.append(c)
     problem.f = nominal_load
     

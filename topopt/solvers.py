@@ -28,7 +28,7 @@ class ComplianceFunction(torch.autograd.Function):
     """
     
     @staticmethod
-    def forward(ctx, x_phys: torch.Tensor, problem: Problem):
+    def forward(ctx, x_phys, problem):
         """
         Forward pass: compute compliance using FEM.
         
@@ -45,20 +45,14 @@ class ComplianceFunction(torch.autograd.Function):
             Scalar compliance value
         """
         x_np = x_phys.detach().cpu().numpy()
-        dobj = numpy.zeros_like(x_np)
         
-        # Compute objective and sensitivity using problem's FEM solver
-        # This modifies dobj IN-PLACE with the sensitivities
-        obj = problem.compute_objective(x_np, dobj)
-        
-        # IMPORTANT: dobj is now updated with the actual gradients!
-        # Make a copy to ensure we capture the modified values
-        dobj_copy = dobj.copy()
+        # Compute objective and gradient using FEM
+        obj, dobj = problem.compute_objective(x_np)
         
         # Save for backward pass
         ctx.save_for_backward(x_phys)
         ctx.problem = problem
-        ctx.dobj = torch.from_numpy(dobj_copy).float()
+        ctx.dobj = torch.from_numpy(dobj.copy()).float()
         
         return torch.tensor(obj, dtype=x_phys.dtype, device=x_phys.device)
     
@@ -152,8 +146,7 @@ class BetaParameterFunction(torch.autograd.Function):
         dobj_avg = numpy.zeros_like(alpha_np)
         
         for sample in rho_samples:
-            dobj_sample = numpy.zeros_like(sample)
-            c = problem.compute_objective(sample, dobj_sample)
+            c, dobj_sample = problem.compute_objective(sample)
             compliances.append(c)
             dobj_avg += dobj_sample
         
@@ -327,8 +320,7 @@ class BetaRandomLoadFunction(torch.autograd.Function):
                     f_reshaped = f.reshape(-1, 1) if f.ndim == 1 else f
                     problem.f = f_reshaped
                 
-                dobj_sample = numpy.zeros_like(rho)
-                c = problem.compute_objective(rho, dobj_sample)
+                c, dobj_sample = problem.compute_objective(rho)
                 compliances.append(c)
                 sensitivities_avg += dobj_sample
         
@@ -919,8 +911,7 @@ class BetaSolverRandomLoads(BetaSolverWithImplicitDiff):
                     f_reshaped = f.reshape(-1, 1) if f.ndim == 1 else f
                     self.problem.f = f_reshaped
                 
-                dobj_dummy = numpy.zeros_like(rho_opt)
-                c = self.problem.compute_objective(rho_opt, dobj_dummy)
+                c, _ = self.problem.compute_objective(rho_opt)
                 compliances.append(c)
         finally:
             # Restore nominal load

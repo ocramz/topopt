@@ -107,7 +107,7 @@ class Problem(abc.ABC):
 
     @abc.abstractmethod
     def compute_objective(
-            self, xPhys: numpy.ndarray, dobj: numpy.ndarray) -> float:
+            self, xPhys: numpy.ndarray) -> tuple:
         """
         Compute objective and its gradient.
 
@@ -115,13 +115,13 @@ class Problem(abc.ABC):
         ----------
         xPhys:
             The design variables.
-        dobj:
-            The gradient of the objective to compute.
 
         Returns
         -------
-        float
-            The objective value.
+        tuple
+            A tuple (objective, gradient) where:
+            - objective is a float
+            - gradient is a numpy.ndarray with shape matching xPhys
 
         """
         pass
@@ -362,7 +362,7 @@ class ComplianceProblem(ElasticityProblem):
     """
 
     def compute_objective(
-            self, xPhys: numpy.ndarray, dobj: numpy.ndarray) -> float:
+            self, xPhys: numpy.ndarray) -> tuple:
         r"""
         Compute compliance and its gradient.
 
@@ -386,20 +386,20 @@ class ComplianceProblem(ElasticityProblem):
         ----------
         xPhys:
             The element densities.
-        dobj:
-            The gradient of compliance.
 
         Returns
         -------
-        float
-            The compliance value.
+        tuple
+            A tuple (objective, gradient) where:
+            - objective is the compliance (float)
+            - gradient is the sensitivity array (numpy.ndarray)
 
         """
         # Setup and solve FE problem
         self.update_displacements(xPhys)
 
         obj = 0.0
-        dobj[:] = 0.0
+        dobj = numpy.zeros_like(xPhys)
         dE = numpy.empty(xPhys.shape)
         E = self.compute_young_moduli(xPhys, dE)
         for i in range(self.nloads):
@@ -408,7 +408,9 @@ class ComplianceProblem(ElasticityProblem):
             obj += (E * self.obje).sum()
             dobj[:] += -dE * self.obje
         dobj /= float(self.nloads)
-        return obj / float(self.nloads)
+        obj /= float(self.nloads)
+        
+        return obj, dobj
 
 
 class HarmonicLoadsProblem(ElasticityProblem):

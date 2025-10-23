@@ -62,7 +62,9 @@ class MechanismSynthesisSolver(TopOptSolver):
         self.gui.update(self.xPhys)
 
         # Objective and sensitivity
-        obj = self.problem.compute_objective(self.xPhys, dobj)
+        obj, dobj_computed = self.problem.compute_objective(self.xPhys)
+        dobj[:] = dobj_computed
+        
         if self.init_obj is None:
             self.init_obj = obj
         obj /= self.init_obj
