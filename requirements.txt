@@ -1,3 +1,4 @@
+betaincder # derivatives of the incomplete beta function
 matplotlib
 numpy
 scipy
