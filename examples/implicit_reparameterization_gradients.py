@@ -173,8 +173,8 @@ class BetaReparameterizationGradients:
         self.alpha = torch.tensor(alpha_init, requires_grad=True, dtype=torch.float32)
         self.beta = torch.tensor(beta_init, requires_grad=True, dtype=torch.float32)
     
-    def sample_scipy(self, n_samples=100):
-        """Sample from Beta(α, β) using scipy."""
+    def sample_numpy(self, n_samples=100):
+        """Sample from Beta(α, β) using numpy."""
         alpha_np = self.alpha.detach().cpu().numpy()
         beta_np = self.beta.detach().cpu().numpy()
         z = np.random.beta(alpha_np, beta_np, n_samples)
@@ -210,10 +210,10 @@ class BetaReparameterizationGradients:
         
         Where q(z) is the PDF of Beta(α,β).
         """
-        # betaincder works with scalars, so we vectorize
-        dF_dalpha = np.array([betaincderp(float(z_i), float(alpha_np), float(beta_np)) 
+        # Compute CDF gradients using class methods
+        dF_dalpha = np.array([self.beta_cdf_grad_alpha(float(z_i), float(alpha_np), float(beta_np)) 
                              for z_i in z_np])
-        dF_dbeta = np.array([betaincderq(float(z_i), float(alpha_np), float(beta_np)) 
+        dF_dbeta = np.array([self.beta_cdf_grad_beta(float(z_i), float(alpha_np), float(beta_np)) 
                             for z_i in z_np])
         
         # Compute PDF at z
@@ -236,7 +236,7 @@ class BetaReparameterizationGradients:
         ∇_φ E[f] = E[∇_z f(z) · ∇_φ z]
         """
         # Sample from Beta
-        z = self.sample_scipy(n_samples).numpy()
+        z = self.sample_numpy(n_samples).numpy()
         
         # Extract parameters
         alpha_np = self.alpha.item()
@@ -287,9 +287,9 @@ class BetaReparameterizationGradients:
                 self.alpha -= learning_rate * grad_alpha
                 self.beta -= learning_rate * grad_beta
                 
-                # Ensure parameters stay > 0
-                self.alpha.clamp_(min=0.1)
-                self.beta.clamp_(min=0.1)
+                # Ensure parameters stay > 0.1
+                self.alpha.clamp_(min= 0.1)
+                self.beta.clamp_(min= 0.1)
             
             if it % 10 == 0 or it == n_iterations - 1:
                 print(f"{it:5d} {self.alpha.item():8.4f} {self.beta.item():8.4f} "
@@ -386,15 +386,12 @@ if __name__ == '__main__':
     print("\n" + "="*70)
     beta_solver = BetaReparameterizationGradients(alpha_init=1.5, beta_init=1.5)
 
-    n_iterations = 100
+    n_iterations = 200
     
-    # def cost_fun(z):
-    #     return (z - 0.25) ** 2
-    # cost_fun.__name__ = "(z - 0.25)²"
-
     def cost_fun(z):
-        return torch.sin(0.25 * z)
-    cost_fun.__name__ = "sin(0.25·z)"
+        return (z - 0.25) ** 2
+    cost_fun.__name__ = "(z - 0.25)²"
+
     
     history = beta_solver.optimize(cost_fun, n_iterations= n_iterations, learning_rate=0.1)
     
