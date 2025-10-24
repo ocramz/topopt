@@ -130,12 +130,22 @@ class ConstraintNumpy:
         self.bound = bound
     
     def __call__(self, x):
-        """Evaluate constraint with numpy array, return float."""
-        return float(x[0]**2 + x[1]**2 - self.bound)
+        """
+        Evaluate constraint with numpy array.
+        
+        For scipy 'ineq' type: constraint(x) >= 0 means feasible
+        We want: x1^2 + x2^2 <= bound
+        So we return: bound - (x1^2 + x2^2)
+        """
+        return float(self.bound - (x[0]**2 + x[1]**2))
     
     def gradient(self, x):
-        """Compute analytical gradient."""
-        return 2.0 * x
+        """
+        Compute analytical gradient.
+        
+        d/dx (bound - x1^2 - x2^2) = [-2*x1, -2*x2]
+        """
+        return -2.0 * x
 
 
 # ============================================================================
@@ -189,7 +199,8 @@ class ConstrainedOptimizer(torch.autograd.Function):
         
         # For each sample, solve constrained optimization
         objectives = []
-        gradients_sum = np.zeros_like(alpha_np)
+        x_optima = []
+        gradients_at_opt = []
         
         for x1_init, x2_init in zip(x1_samples, x2_samples):
             x_init = np.array([x1_init, x2_init])
@@ -211,18 +222,42 @@ class ConstrainedOptimizer(torch.autograd.Function):
             x_opt = result.x
             f_opt = result.fun
             objectives.append(f_opt)
+            x_optima.append(x_opt)
             
-            # Compute sensitivity: gradient at optimal point
+            # Gradient of objective at optimal point
             grad = obj_func.gradient(x_opt)
-            gradients_sum += grad
+            gradients_at_opt.append(grad)
         
-        # Expected objective and gradient
+        # Expected objective and average gradient at optimal points
         expected_obj = np.mean(objectives)
-        expected_grad = gradients_sum / n_samples
+        avg_grad_at_opt = np.mean(gradients_at_opt, axis=0)
+        
+        # Debug: print first few optimal designs and objectives
+        if alpha_np[0] > 4.0:  # Only print later iterations
+            print(f"\n  [Forward] alpha={alpha_np}, beta={beta_np}")
+            print(f"  [Forward] First 3 samples: x_opt={x_optima[:3]}, f_opt={objectives[:3]}")
+            print(f"  [Forward] Expected obj={expected_obj:.6f}, avg_grad={avg_grad_at_opt}")
+        
+        # Now compute implicit differentiation
+        # For Beta distribution: E[x] = α/(α+β)
+        # dE[x]/dα = β/(α+β)²
+        # dE[x]/dβ = -α/(α+β)²
+        
+        # The gradient w.r.t. α and β comes from:
+        # dL/dα = (df/dx)|_{x*} · (dE[x]/dα)
+        ab_sum = alpha_np + beta_np
+        d_mean_d_alpha = beta_np / (ab_sum ** 2)
+        d_mean_d_beta = -alpha_np / (ab_sum ** 2)
+        
+        # These gradients tell us how the expected value changes
+        grad_alpha_implicit = avg_grad_at_opt * d_mean_d_alpha
+        grad_beta_implicit = avg_grad_at_opt * d_mean_d_beta
         
         # Save for backward
         ctx.save_for_backward(alpha, beta)
-        ctx.expected_grad = torch.from_numpy(expected_grad).float()
+        ctx.grad_alpha_implicit = torch.from_numpy(grad_alpha_implicit).float()
+        ctx.grad_beta_implicit = torch.from_numpy(grad_beta_implicit).float()
+        ctx.x_optima = x_optima
         ctx.n_samples = n_samples
         
         return torch.tensor(expected_obj, dtype=alpha.dtype)
@@ -238,16 +273,12 @@ class ConstrainedOptimizer(torch.autograd.Function):
         - dE[x]/dβ = -α/(α+β)²
         """
         alpha, beta = ctx.saved_tensors
-        expected_grad = ctx.expected_grad
+        grad_alpha_implicit = ctx.grad_alpha_implicit
+        grad_beta_implicit = ctx.grad_beta_implicit
         
-        # Beta moment derivatives
-        ab_sum = alpha + beta
-        d_mean_d_alpha = beta / (ab_sum ** 2)
-        d_mean_d_beta = -alpha / (ab_sum ** 2)
-        
-        # Chain rule
-        grad_alpha = expected_grad * d_mean_d_alpha * grad_output
-        grad_beta = expected_grad * d_mean_d_beta * grad_output
+        # Chain through with grad_output (keeping shape [2])
+        grad_alpha = grad_alpha_implicit * grad_output
+        grad_beta = grad_beta_implicit * grad_output
         
         # None for the module parameters
         return grad_alpha, grad_beta, None, None, None
@@ -261,6 +292,9 @@ class BetaParameterizedSolver:
     """
     Solve optimization problem using Beta-parameterized design variables
     with implicit differentiation.
+    
+    OUTPUT: Optimal Beta parameters α*, β* such that when you sample
+    x ~ Beta(α*, β*) and solve the constrained problem, you get a good solution.
     """
     
     def __init__(self, objective_module, constraint_module, 
@@ -287,9 +321,10 @@ class BetaParameterizedSolver:
         self.n_samples = n_samples
         self.n_iterations = n_iterations
         
-        # Beta parameters (initialized to Beta(2,2) - uniform-ish)
-        self.alpha_logit = nn.Parameter(torch.zeros(2))
-        self.beta_logit = nn.Parameter(torch.zeros(2))
+        # Beta parameters: these are what we optimize
+        # Initialized to Beta(2,2) for each dimension
+        self.alpha_logit = nn.Parameter(torch.tensor([0.0, 0.0]))
+        self.beta_logit = nn.Parameter(torch.tensor([0.0, 0.0]))
         
         # Optimizer
         self.optimizer = torch.optim.Adam(
@@ -302,12 +337,16 @@ class BetaParameterizedSolver:
             'objective': [],
             'alpha': [],
             'beta': [],
-            'mean_design': []
         }
     
     def _get_alpha_beta(self):
         """
         Get α and β from logit parameters, ensuring both > 1.
+        
+        Returns
+        -------
+        torch.Tensor, torch.Tensor
+            Alpha and beta parameters, each with shape [2]
         """
         alpha = F.softplus(self.alpha_logit) + 1.0
         beta = F.softplus(self.beta_logit) + 1.0
@@ -317,6 +356,10 @@ class BetaParameterizedSolver:
         """
         Optimize Beta parameters.
         
+        The goal is to find α*, β* such that:
+          E_ρ[f*(ρ)] is minimized
+        where f*(ρ) = min_x f(x) s.t. g(x) <= 0, x initialized at ρ
+        
         Returns
         -------
         dict
@@ -324,65 +367,150 @@ class BetaParameterizedSolver:
         """
         print("\nBeta-Parameterized Optimization")
         print("=" * 70)
-        print(f"{'Iter':>5} {'Objective':>15} {'||α||':>10} {'||β||':>10} {'E[x1]':>8} {'E[x2]':>8}")
+        print("Finding optimal Beta parameters α* and β*")
+        print(f"{'Iter':>5} {'Expected Obj':>15} {'α[0]':>8} {'β[0]':>8} {'α[1]':>8} {'β[1]':>8}")
         print("-" * 70)
         
         for iteration in range(self.n_iterations):
             self.optimizer.zero_grad()
             
-            # Get α, β
+            # Get current α, β (these are the parameters being optimized)
             alpha, beta = self._get_alpha_beta()
             
-            # Compute objective via implicit differentiation
+            # Compute expected objective via implicit differentiation
+            # This samples x ~ Beta(α, β), solves the constrained problem,
+            # and returns E[f*(x)]
             obj = ConstrainedOptimizer.apply(
                 alpha, beta, self.objective_module, self.constraint_module,
                 self.n_samples
             )
             
-            # Backward pass
+            # Backward pass - computes gradients of expected objective w.r.t. α and β
             obj.backward()
+            
             self.optimizer.step()
             
             # Track history
             alpha_val, beta_val = self._get_alpha_beta()
-            mean_design = (alpha_val / (alpha_val + beta_val)).detach().cpu().numpy()
             
             self.history['objective'].append(obj.item())
             self.history['alpha'].append(alpha_val.detach().cpu().numpy().copy())
             self.history['beta'].append(beta_val.detach().cpu().numpy().copy())
-            self.history['mean_design'].append(mean_design.copy())
             
             # Print progress
             if iteration % 10 == 0 or iteration == self.n_iterations - 1:
-                print(f"{iteration:5d} {obj.item():15.6f} {torch.norm(alpha):10.4f} "
-                      f"{torch.norm(beta):10.4f} {mean_design[0]:8.4f} {mean_design[1]:8.4f}")
+                print(f"{iteration:5d} {obj.item():15.6f} {alpha_val[0].item():8.4f} "
+                      f"{beta_val[0].item():8.4f} {alpha_val[1].item():8.4f} {beta_val[1].item():8.4f}")
         
         print("-" * 70)
+        print("Optimization complete!\n")
         return self.history
     
-    def get_solution(self):
-        """Get mean design and confidence intervals."""
+    def get_optimal_parameters(self):
+        """
+        Get optimal Beta parameters.
+        
+        This is THE main output of the solver.
+        Users will sample from Beta(α*, β*) to get designs.
+        
+        Returns
+        -------
+        dict with keys:
+            'alpha' : np.ndarray, shape (2,)
+                Optimal alpha parameters for each design variable
+            'beta' : np.ndarray, shape (2,)
+                Optimal beta parameters for each design variable
+        """
         alpha_final, beta_final = self._get_alpha_beta()
         alpha_np = alpha_final.detach().cpu().numpy()
         beta_np = beta_final.detach().cpu().numpy()
         
-        # Mean design
-        mean_design = alpha_np / (alpha_np + beta_np)
+        return {
+            'alpha': alpha_np,
+            'beta': beta_np,
+        }
+    
+    def sample_designs(self, n_designs=100):
+        """
+        Sample designs from the optimized Beta distribution.
         
-        # 95% confidence intervals
-        ci_lower = np.array([stats.beta.ppf(0.025, a, b) for a, b in zip(alpha_np, beta_np)])
-        ci_upper = np.array([stats.beta.ppf(0.975, a, b) for a, b in zip(alpha_np, beta_np)])
+        This is how you USE the trained solver.
         
-        # Variance
-        variance = (alpha_np * beta_np) / ((alpha_np + beta_np)**2 * (alpha_np + beta_np + 1))
+        Parameters
+        ----------
+        n_designs : int
+            Number of design samples
+            
+        Returns
+        -------
+        np.ndarray, shape (n_designs, 2)
+            Design samples from Beta(α*, β*)
+        """
+        params = self.get_optimal_parameters()
+        alpha = params['alpha']
+        beta = params['beta']
+        
+        # Sample from the Beta distribution for each design variable
+        designs = np.column_stack([
+            np.random.beta(alpha[0], beta[0], n_designs),
+            np.random.beta(alpha[1], beta[1], n_designs)
+        ])
+        
+        return designs
+    
+    def evaluate_designs(self, designs, constraint_module):
+        """
+        For sampled designs, solve the constrained problem and evaluate.
+        
+        This shows how to USE the learned distribution in practice.
+        
+        Parameters
+        ----------
+        designs : np.ndarray, shape (n_designs, 2)
+            Initial design samples
+        constraint_module : nn.Module
+            Constraint function
+            
+        Returns
+        -------
+        dict with keys:
+            'designs_init': Initial sampled designs
+            'designs_optimized': Optimized designs (after solving constrained problem)
+            'objectives': Objective values at optimized designs
+            'feasible': Boolean array indicating feasibility
+        """
+        obj_func = ObjectiveNumpy()
+        constraint_func = ConstraintNumpy(constraint_module.bound)
+        
+        designs_optimized = []
+        objectives = []
+        feasible = []
+        
+        for x_init in designs:
+            constraints = {'type': 'ineq', 'fun': constraint_func}
+            bounds = [(0, 1), (0, 1)]
+            
+            result = minimize(
+                obj_func,
+                x_init,
+                method='SLSQP',
+                jac=obj_func.gradient,
+                constraints=constraints,
+                bounds=bounds,
+                options={'ftol': 1e-9}
+            )
+            
+            designs_optimized.append(result.x)
+            objectives.append(result.fun)
+            # Check feasibility: x1^2 + x2^2 <= 0.5
+            c_val = result.x[0]**2 + result.x[1]**2 - constraint_module.bound
+            feasible.append(c_val <= 1e-6)
         
         return {
-            'mean': mean_design,
-            'ci_lower': ci_lower,
-            'ci_upper': ci_upper,
-            'variance': variance,
-            'alpha': alpha_np,
-            'beta': beta_np
+            'designs_init': designs,
+            'designs_optimized': np.array(designs_optimized),
+            'objectives': np.array(objectives),
+            'feasible': np.array(feasible),
         }
 
 
@@ -545,6 +673,10 @@ if __name__ == '__main__':
     # ========================================================================
     # Method 2: Beta-parameterized optimization with implicit differentiation
     # ========================================================================
+    print("\n" + "="*70)
+    print("TRAINING THE BETA SOLVER")
+    print("="*70)
+    
     solver = BetaParameterizedSolver(
         objective_module, constraint_module,
         learning_rate=0.05, n_samples=50, n_iterations=100
@@ -552,76 +684,73 @@ if __name__ == '__main__':
     history = solver.optimize()
     
     # ========================================================================
-    # Extract and display results
+    # MAIN OUTPUT: Optimal Beta Parameters
     # ========================================================================
-    solution = solver.get_solution()
+    optimal_params = solver.get_optimal_parameters()
     
-    print("\n" + "="*70)
-    print("RESULTS COMPARISON")
     print("="*70)
+    print("OPTIMAL BETA PARAMETERS (Main Output)")
+    print("="*70)
+    print("\nThese are the parameters α* and β* of the learned distribution.")
+    print("When you need a design, sample x ~ Beta(α*, β*) and solve the")
+    print("constrained problem starting from that sample.\n")
     
-    print("\nBaseline (standard constrained optimization):")
-    print(f"  Design:     x = [{baseline['x'][0]:.4f}, {baseline['x'][1]:.4f}]")
-    print(f"  Objective:  f(x) = {baseline['f']:.6f}")
-    
-    print("\nBeta-parameterized optimization (mean design):")
-    print(f"  E[x]:       E[x] = [{solution['mean'][0]:.4f}, {solution['mean'][1]:.4f}]")
-    print(f"  Confidence intervals (95%):")
-    print(f"    x1 ∈ [{solution['ci_lower'][0]:.4f}, {solution['ci_upper'][0]:.4f}]")
-    print(f"    x2 ∈ [{solution['ci_lower'][1]:.4f}, {solution['ci_upper'][1]:.4f}]")
-    print(f"  Beta parameters:")
-    print(f"    α = [{solution['alpha'][0]:.4f}, {solution['alpha'][1]:.4f}]")
-    print(f"    β = [{solution['beta'][0]:.4f}, {solution['beta'][1]:.4f}]")
-    
-    # Evaluate objective at mean design using module
-    x_mean = torch.from_numpy(solution['mean']).float()
-    obj_mean = objective_module(x_mean).item()
-    print(f"  Objective at mean: f(E[x]) = {obj_mean:.6f}")
+    print(f"α* = {optimal_params['alpha']}")
+    print(f"β* = {optimal_params['beta']}")
+    print(f"\nInterpretation:")
+    print(f"  x1 ~ Beta({optimal_params['alpha'][0]:.4f}, {optimal_params['beta'][0]:.4f})")
+    print(f"  x2 ~ Beta({optimal_params['alpha'][1]:.4f}, {optimal_params['beta'][1]:.4f})")
     
     # ========================================================================
-    # Uncertainty quantification
+    # HOW TO USE THE LEARNED DISTRIBUTION
     # ========================================================================
     print("\n" + "="*70)
-    print("UNCERTAINTY QUANTIFICATION")
+    print("USING THE LEARNED DISTRIBUTION")
     print("="*70)
-    print("\nDesign variance (uncertainty at each variable):")
-    print(f"  Var[x1] = {solution['variance'][0]:.6f}")
-    print(f"  Var[x2] = {solution['variance'][1]:.6f}")
-    print(f"  Total variance: {solution['variance'].sum():.6f}")
+    
+    # Sample designs from the learned distribution
+    n_samples_user = 20
+    sampled_designs = solver.sample_designs(n_designs=n_samples_user)
+    print(f"\nSampled {n_samples_user} designs from Beta(α*, β*):")
+    print(f"  Shape: {sampled_designs.shape}")
+    print(f"  Mean: [{sampled_designs.mean(axis=0)[0]:.4f}, {sampled_designs.mean(axis=0)[1]:.4f}]")
+    print(f"  Std:  [{sampled_designs.std(axis=0)[0]:.4f}, {sampled_designs.std(axis=0)[1]:.4f}]")
+    
+    # Solve constrained problem for each sampled design
+    print(f"\nSolving constrained problem for each sampled design...")
+    results = solver.evaluate_designs(sampled_designs, constraint_module)
+    
+    print(f"\nResults:")
+    print(f"  Total samples: {len(results['feasible'])}")
+    print(f"  Feasible: {results['feasible'].sum()}/{len(results['feasible'])}")
+    print(f"  Objective values:")
+    print(f"    Mean: {results['objectives'].mean():.6f}")
+    print(f"    Std:  {results['objectives'].std():.6f}")
+    print(f"    Min:  {results['objectives'].min():.6f}")
+    print(f"    Max:  {results['objectives'].max():.6f}")
+    
+    print(f"\nOptimized designs:")
+    print(f"  Mean: [{results['designs_optimized'].mean(axis=0)[0]:.4f}, "
+          f"{results['designs_optimized'].mean(axis=0)[1]:.4f}]")
     
     # ========================================================================
-    # Robustness analysis
-    # ========================================================================
-    robustness = robustness_analysis(
-        solver, objective_module, constraint_module,
-        n_perturbations=50, perturbation_scale=0.15
-    )
-    
-    # ========================================================================
-    # Summary
+    # COMPARISON
     # ========================================================================
     print("\n" + "="*70)
-    print("SUMMARY")
+    print("COMPARISON WITH BASELINE")
     print("="*70)
-    print("""
-Key observations:
-1. The constraint x1^2 + x2^2 <= 0.5 is active at the optimum
-2. Beta parameterization captures design uncertainty naturally
-3. Implicit differentiation enables gradient-based optimization
-4. Confidence intervals quantify design uncertainty
-5. Robustness analysis shows design stability under perturbations
-
-Advantages of Beta-parameterized approach:
-- Principled uncertainty quantification
-- Natural handling of box constraints (0-1)
-- Implicit differentiation through complex constraints
-- Hierarchical design exploration
-- Robustness evaluation via sampling
-
-PyTorch Modules Benefits:
-- Fully differentiable objective and constraint functions
-- Seamless integration with autograd system
-- Easy to extend with custom PyTorch operations
-- Natural handling of batched computations
-- GPU acceleration ready
-    """)
+    
+    print("\nBaseline (single constrained optimization):")
+    print(f"  Design: x* = [{baseline['x'][0]:.4f}, {baseline['x'][1]:.4f}]")
+    print(f"  Objective: f(x*) = {baseline['f']:.6f}")
+    
+    print("\nBeta-parameterized (distribution of solutions):")
+    print(f"  Optimal parameters: α* = {optimal_params['alpha']}, β* = {optimal_params['beta']}")
+    print(f"  Expected objective (over 20 samples): {results['objectives'].mean():.6f}")
+    print(f"  Design variety (std of objectives): {results['objectives'].std():.6f}")
+    
+    print("\nKey difference:")
+    print("  - Baseline: Single point x*")
+    print("  - Beta method: Distribution Beta(α*, β*)")
+    print("              Users sample from this to get designs")
+    print("              Each sample, when optimized, yields a good solution")
